@@ -149,6 +149,36 @@ namespace YAFC.Parser
                     rocketInventorySizes[rocket.Get("name", "")] = size;
         }
         
+        private void PrintR(LuaTable table, string indent = "") {
+            foreach (var entry in table.ObjectElements) {
+                if (entry.Value is LuaTable) {
+                    Console.WriteLine(indent + entry.Key + " => {");
+                    PrintR((LuaTable) entry.Value, indent + "  ");
+                    Console.WriteLine(indent + "}");
+                } else {
+                    Console.WriteLine(indent + entry.Key + " => " + entry.Value);
+                }
+            }
+        }
+        private void PrintDiag(LuaTable table) {
+            Console.WriteLine("");
+            Console.WriteLine("=============================================================================================");
+            Console.WriteLine(table.Get("type", "") + " \"" + table.Get("name", "null") + "\"");
+            Console.WriteLine("=============================================================================================");
+            Console.WriteLine("");
+            PrintR(table);
+            // LuaTable fluid_boxes = table.Get<LuaTable>("fluid_boxes", null);
+            /*if (fluid_boxes != null) {
+                Console.WriteLine("   Fluid boxes:");
+                PrintR(fluid_boxes, "        ");
+            }
+            LuaTable collision_box = table.Get<LuaTable>("collision_box", null);
+            if (fluid_boxes != null) {
+                Console.WriteLine("   Collision box:");
+                PrintR(fluid_boxes, "        ");
+            }*/
+        }
+        
         private void DeserializeEntity(LuaTable table)
         {
             var factorioType = table.Get("type", "");
@@ -158,12 +188,15 @@ namespace YAFC.Parser
             switch (factorioType)
             {
                 case "transport-belt":
-                    GetObject<Entity, EntityBelt>(name).beltItemsPerSecond = table.Get("speed", 0f) * 480f;;
+                    GetObject<Entity, EntityBelt>(name).beltItemsPerSecond = table.Get("speed", 0f) * 480f;
+                    PrintDiag(table);
                     break;
                 case "inserter":
+                    PrintDiag(table);
                     var inserter = GetObject<Entity, EntityInserter>(name);
                     inserter.inserterSwingTime = 1f / (table.Get("rotation_speed", 1f) * 60);
                     inserter.isStackInserter = table.Get("stack", false);
+                    inserter.handSize = table.Get("hand_size", 1.5f);
                     break;
                 case "accumulator":
                     var accumulator = GetObject<Entity, EntityAccumulator>(name);
@@ -179,6 +212,7 @@ namespace YAFC.Parser
                     recipeCrafters.Add(reactor, SpecialNames.ReactorRecipe);
                     break;
                 case "beacon":
+                    PrintDiag(table);
                     var beacon = GetObject<Entity, EntityBeacon>(name);
                     beacon.beaconEfficiency = table.Get("distribution_effectivity", 0f);
                     table.Get("energy_usage", out usesPower);
@@ -238,6 +272,7 @@ namespace YAFC.Parser
                 case "assembling-machine":
                 case "rocket-silo":
                 case "furnace":
+                    PrintDiag(table);
                     var crafter = GetObject<Entity, EntityCrafter>(name);
                     table.Get("energy_usage", out usesPower);
                     ParseModules(table, crafter, AllowedEffects.None);
@@ -364,6 +399,9 @@ namespace YAFC.Parser
                 case "constant-combinator":
                     if (name == "constant-combinator")
                         Database.constantCombinatorCapacity = table.Get("item_slot_count", 18);
+                    break;
+                default:
+                    Console.WriteLine("[Ignoring unknown type " + factorioType + "]");
                     break;
             }
             

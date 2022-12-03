@@ -1,5 +1,7 @@
 using System;
 using System.Buffers.Text;
+using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Text;
@@ -42,6 +44,182 @@ namespace YAFC
             MainScreen.Instance.ShowPseudoScreen(Instance);
         }
         
+        private Dictionary<string, Recipe> DetermineBestRecipes() {
+            var result = new Dictionary<string, Recipe>();
+            foreach (var good in Database.goods.all) {
+                foreach (var recipe in good.production) {
+                    if (result.TryAdd(good.name, recipe)) {
+                        foreach (var product in recipe.products)
+                            result.TryAdd(product.goods.name, recipe);
+                        continue;
+                    }
+                    Recipe old = result[good.name];
+                    if (recipe.Cost() < old.Cost()) result[good.name] = recipe;
+                }
+            }
+            return result;
+        }
+
+        // Adds a recipe to the given list and adds its rank to the given dictionary. Returns its rank.
+        private int AddRecipeAndDependencies(Recipe recipe, List<Recipe> recipe_list, Dictionary<string, int> ranks, Dictionary<string, Recipe> best_recipes) {
+            int rank;
+            if (ranks.TryGetValue(recipe.name, out rank)) return rank;
+            rank = 0;
+            ranks.Add(recipe.name, 0);
+            foreach (var ingredient in recipe.ingredients) {
+                Recipe best_recipe;
+                if (!best_recipes.TryGetValue(ingredient.goods.name, out best_recipe)) {
+                    Console.Error.WriteLine(ingredient.goods.name + " has no recipe but is an ingredient...");
+                    continue;
+                }
+                rank = Math.Max(rank, AddRecipeAndDependencies(best_recipe, recipe_list, ranks, best_recipes) + 1);
+            }
+            ranks[recipe.name] = rank;
+            recipe_list.Add(recipe);
+            return rank;
+        }
+        
+        private List<Recipe> ComputeRecipeHierarchy(Dictionary<string, int> ranks = null) {
+            if (ranks == null) ranks = new Dictionary<string, int>();
+            var result = new List<Recipe>();
+            var best_recipes = DetermineBestRecipes();
+            foreach (var recipe in best_recipes) {
+                AddRecipeAndDependencies(recipe.Value, result, ranks, best_recipes);
+            }
+            return result;
+        }
+
+        // Puts the input/output goods of the given recipes in a list, grouped
+        // via Markov model. This places recipes with similar inputs nearby.
+        private List<Goods> MarkovSortedGoods(List<Recipe> recipes) {
+            var markov = new Dictionary<string, Dictionary<string, int>>();
+            var seen = new Dictionary<string, int>();
+            var mapped = new Dictionary<string, Goods>();
+            foreach (var recipe in recipes) {
+                foreach (var product in recipe.ingredients) {
+                    mapped.TryAdd(product.goods.name, product.goods);
+                    if (!seen.TryAdd(product.goods.name, 1))
+                        seen[product.goods.name] += 1;
+                    if (markov.TryAdd(product.goods.name, null))
+                      markov[product.goods.name] = new Dictionary<string, int>();
+                    foreach (var product2 in recipe.ingredients) {
+                        if (product2.goods.name != product.goods.name) {
+                            if (!markov[product.goods.name].TryAdd(product2.goods.name, 1))
+                                markov[product.goods.name][product2.goods.name] += 1;
+                        }
+                    }
+                    foreach (var product2 in recipe.products) {
+                        if (product2.goods.name != product.goods.name) {
+                            if (!markov[product.goods.name].TryAdd(product2.goods.name, 1))
+                                markov[product.goods.name][product2.goods.name] += 1;
+                        }
+                    }
+                }
+            }
+            var ordering = new System.Collections.Generic.PriorityQueue<string, int>();
+            foreach (var item in seen) {
+                // Use a very low priority so that we don't iterate elements by
+                // total quantity until we're completely out of Markov suggestions.
+                // Start with the most basic (lowest-value) items.
+                double cost = mapped[item.Key].Cost();
+                cost = double.IsInfinity(cost) || cost < 0 ? 1000 : Math.Sqrt(cost * 10);
+                ordering.Enqueue(item.Key, 110000000 - item.Value * 100000 + (int) cost);
+                Console.Write("Enqueue initializer " + item.Key + " @" + (110000000 - item.Value * 100000 + (int) cost).ToString()
+                              + " (item was used in " + item.Value.ToString() + " recipe(s); cost heuristic " + cost.ToString() + ")\n");
+            }
+            var result = new List<Goods>();
+            var written = new HashSet<string>();
+            string current;
+            int priority;
+            while (ordering.TryDequeue(out current, out priority)) {
+                if (written.Add(current)) {
+                    Console.Write("Accepting " + current + " (" + priority.ToString() + "), which should be followed by:  [\n");
+                    result.Add(mapped[current]);
+                    if (priority > 100000000) priority = 0;
+                    foreach (var edge in markov[current]) {
+                        // Favor breadth-first unpacking of Markov pairs.
+                        int newpriority = -edge.Value;
+                        ordering.Enqueue(edge.Key, newpriority);
+                        Console.Write("  " + edge.Key + " (" + newpriority + ")\n");
+                    }
+                    Console.Write("]\n");
+                }
+            }
+            return result;
+        }
+
+        List<Recipe> ComputeAvailableRecipes() {
+            var recipes = new List<Recipe>();
+            foreach (var recipe in ComputeRecipeHierarchy()) {
+                if (!Milestones.Instance.IsAccessibleWithCurrentMilesones(recipe)) continue;
+                if (recipe.name.Contains("delivery-cannon")) continue;
+                recipes.Add(recipe);
+            }
+            return recipes;
+        }
+
+        // An Excel-like spreadsheet representation of all game recipes.
+        // Not to be confused with the production sheet YAFC users create.
+        struct RecipeSpreadsheet {
+            public struct MatrixRow {
+                public Recipe recipe;
+                public List<int> ordered_counts;
+                public MatrixRow(Recipe r) {
+                    recipe = r;
+                    ordered_counts = new List<int>();
+                }
+            }
+            public List<Goods> goods { get; }
+            public List<MatrixRow> rows { get; }
+
+            // Sort by first ingredient column. Recipes with more incredients
+            // toward the first column are sorted to the top of the list.
+            void Sort() {
+                rows.Sort((l1, l2) => {
+                    for (int i = 0; i < l1.ordered_counts.Count; ++i) {
+                        if (l1.ordered_counts[i] != 0) {
+                            if (l2.ordered_counts[i] == 0) return -1;
+                        } else {
+                            if (l2.ordered_counts[i] != 0) return 1;
+                        }
+                        if (i > l2.ordered_counts.Count) return 1;
+                    }
+                    if (l2.ordered_counts.Count > l1.ordered_counts.Count)
+                        return -1;
+                    return 0;
+                });
+            }
+
+            public RecipeSpreadsheet(List<Goods> goods, List<MatrixRow> rows) {
+                this.goods = goods;
+                this.rows = rows;
+            }
+        }
+
+        // Tabulates the given recipes as a spreadsheet of inputs/outputs.
+        RecipeSpreadsheet ComputeRecipeSheet(List<Recipe> recipes) {
+            var goods = MarkovSortedGoods(recipes);
+            var rows = new List<RecipeSpreadsheet.MatrixRow>();
+            foreach (var recipe in recipes) {
+                var amounts = new Dictionary<string, float>();
+                foreach (var ingredient in recipe.ingredients) {
+                    amounts.Add(ingredient.goods.name, -ingredient.amount);
+                }
+                foreach (var product in recipe.products) {
+                    if (!amounts.TryAdd(product.goods.name, product.amount))
+                        amounts[product.goods.name] += product.amount;
+                }
+                var row = new RecipeSpreadsheet.MatrixRow(recipe);
+                foreach (var good in goods) {
+                    float amount = 0;
+                    amounts.TryGetValue(good.name, out amount);
+                    row.ordered_counts.Add((int) amount);
+                }
+                rows.Add(row);
+            }
+            return new RecipeSpreadsheet(goods, rows);
+        }
+
         public override void Build(ImGui gui)
         {
             gui.spacing = 3f;
@@ -128,6 +306,62 @@ namespace YAFC
                     var encoded = Convert.ToBase64String(targetStream.GetBuffer(), 0, (int)targetStream.Length);
                     SDL.SDL_SetClipboardText(encoded);
                 }
+            }
+
+            if (gui.BuildContextMenuButton("Export uncompressed"))
+            {
+                gui.CloseDropdown();
+                var data = JsonUtils.SaveToJson(editingPage);
+                SDL.SDL_SetClipboardText(Encoding.UTF8.GetString(data.GetBuffer()));
+            }
+
+            if (gui.BuildContextMenuButton("Export recipe graph"))
+            {
+                string nodes = "", edges = "";
+                foreach (var recipe in Database.recipes.all) {
+                    if (!Milestones.Instance.IsAccessibleWithCurrentMilesones(recipe)) {
+                        nodes += "    // " + recipe.name + " is not enabled\n";
+                        continue;
+                    }
+                    nodes += "    \"" + recipe.name + "\" [shape=box]\n";
+
+                    edges += "  // " + recipe.name + "\n";
+                    foreach (var ingredient in recipe.ingredients)
+                        edges += "  \"" + ingredient.goods.name + "\" -> \"" + recipe.name + "\"\n";
+                    foreach (var product in recipe.products)
+                        edges += "  \"" + recipe.name + "\" -> \"" + product.goods.name + "\"\n";
+                    edges += "\n";
+                }
+                SDL.SDL_SetClipboardText("digraph recipes {\n  {\n" + nodes + "\n  }\n\n" + edges + "\n}");
+                gui.CloseDropdown();
+            }
+
+            if (gui.BuildContextMenuButton("Export recipe sheet"))
+            {
+                var matrix = ComputeRecipeSheet(ComputeAvailableRecipes());
+                matrix.rows.Sort();
+
+                var sheet = "Recipe Name";
+                foreach (var good in matrix.goods) {
+                    sheet += "\t" + good.name;
+                }
+                sheet += "\n";
+                foreach (var row in matrix.rows) {
+                    var line = row.recipe.name;
+                    int min_ind = row.ordered_counts.Count, max_ind = 0;
+                    for (int i = 0; i < row.ordered_counts.Count; ++i) {
+                        if (row.ordered_counts[i] != 0) {
+                            min_ind = Math.Min(min_ind, i);
+                            max_ind = i;
+                        }
+                    }
+                    for (int i = 0; i < row.ordered_counts.Count; ++i) {
+                        line += "\t" + ((i >= min_ind && i <= max_ind) ? row.ordered_counts[i].ToString() : "");
+                    }
+                    sheet += line + "\n";
+                }
+                SDL.SDL_SetClipboardText(sheet);
+                gui.CloseDropdown();
             }
 
             if (editingPage == MainScreen.Instance.activePage && gui.BuildContextMenuButton("Make full page screenshot"))

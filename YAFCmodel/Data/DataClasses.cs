@@ -447,6 +447,7 @@ namespace YAFC.Model
     {
         public bool isStackInserter { get; internal set; }
         public float inserterSwingTime { get; internal set; }
+        public float handSize { get; internal set; }
     }
 
     public class EntityAccumulator : Entity
